@@ -63,12 +63,15 @@ import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 public class DefaultRequestProcessor extends AsyncNettyRequestProcessor implements NettyRequestProcessor {
     private static InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.NAMESRV_LOGGER_NAME);
 
-    protected final NamesrvController namesrvController;
+    protected final NamesrvController namesrvController;  // NameServer的核心控制器
 
     public DefaultRequestProcessor(NamesrvController namesrvController) {
         this.namesrvController = namesrvController;
     }
 
+    /*
+    * 处理NameServer相关的命令，不同的命令通过不同的方法进行分发
+    * */
     @Override
     public RemotingCommand processRequest(ChannelHandlerContext ctx,
         RemotingCommand request) throws RemotingCommandException {
@@ -90,14 +93,15 @@ public class DefaultRequestProcessor extends AsyncNettyRequestProcessor implemen
                 return this.deleteKVConfig(ctx, request);
             case RequestCode.QUERY_DATA_VERSION:
                 return queryBrokerTopicConfig(ctx, request);
-            case RequestCode.REGISTER_BROKER:
+            case RequestCode.REGISTER_BROKER: // 注册Broker，Broker启动时，会向NameServer注册服务信息
                 Version brokerVersion = MQVersion.value2Version(request.getVersion());
                 if (brokerVersion.ordinal() >= MQVersion.Version.V3_0_11.ordinal()) {
+                    // 高版本（大于3.0.11）注册Broker的同时，还需要注册FilterServer
                     return this.registerBrokerWithFilterServer(ctx, request);
                 } else {
                     return this.registerBroker(ctx, request);
                 }
-            case RequestCode.UNREGISTER_BROKER:
+            case RequestCode.UNREGISTER_BROKER: // 取消注册Broker。当broker停机时，取消注册Broker
                 return this.unregisterBroker(ctx, request);
             case RequestCode.GET_ROUTEINFO_BY_TOPIC:
                 return this.getRouteInfoByTopic(ctx, request);
@@ -107,9 +111,9 @@ public class DefaultRequestProcessor extends AsyncNettyRequestProcessor implemen
                 return this.wipeWritePermOfBroker(ctx, request);
             case RequestCode.ADD_WRITE_PERM_OF_BROKER:
                 return this.addWritePermOfBroker(ctx, request);
-            case RequestCode.GET_ALL_TOPIC_LIST_FROM_NAMESERVER:
+            case RequestCode.GET_ALL_TOPIC_LIST_FROM_NAMESERVER:  // 获取所有的Topic，及其对应的路由信息
                 return getAllTopicListFromNameserver(ctx, request);
-            case RequestCode.DELETE_TOPIC_IN_NAMESRV:
+            case RequestCode.DELETE_TOPIC_IN_NAMESRV:   // 删除NameServer中的topic路由信息，但是并没有删除broker中的topic相关的数据。
                 return deleteTopicInNamesrv(ctx, request);
             case RequestCode.GET_KVLIST_BY_NAMESPACE:
                 return this.getKVListByNamespace(ctx, request);
@@ -284,6 +288,12 @@ public class DefaultRequestProcessor extends AsyncNettyRequestProcessor implemen
         return response;
     }
 
+    /*
+    * 注册Broker：Broker启动后，会向NameServer注册Broker，同时也会启动一个后台定时任务，每30秒注册一下，上报心跳信息，并注册topic等信息
+    * 1. 上报心跳
+    * 2. 注册Broker的路由信息
+    * 3. 注册Broker上的topic的路由信息
+    * */
     public RemotingCommand registerBroker(ChannelHandlerContext ctx,
         RemotingCommand request) throws RemotingCommandException {
         final RemotingCommand response = RemotingCommand.createResponseCommand(RegisterBrokerResponseHeader.class);
@@ -306,6 +316,9 @@ public class DefaultRequestProcessor extends AsyncNettyRequestProcessor implemen
             topicConfigWrapper.getDataVersion().setTimestamp(0);
         }
 
+        /*
+        * 解包并进行crc校验后，具体的注册逻辑交给RouteInfoManager管理器来执行。注册当前Broker到NameServer中
+        * */
         RegisterBrokerResult result = this.namesrvController.getRouteInfoManager().registerBroker(
             requestHeader.getClusterName(),
             requestHeader.getBrokerAddr(),
@@ -313,7 +326,7 @@ public class DefaultRequestProcessor extends AsyncNettyRequestProcessor implemen
             requestHeader.getBrokerId(),
             requestHeader.getHaServerAddr(),
             topicConfigWrapper,
-            null,
+            null,  // 老版本不支持filterServer，因此不注册filterServerList
             ctx.channel()
         );
 
@@ -333,6 +346,7 @@ public class DefaultRequestProcessor extends AsyncNettyRequestProcessor implemen
         final UnRegisterBrokerRequestHeader requestHeader =
             (UnRegisterBrokerRequestHeader) request.decodeCommandCustomHeader(UnRegisterBrokerRequestHeader.class);
 
+        // 具体的Broker的unregister操作由
         this.namesrvController.getRouteInfoManager().unregisterBroker(
             requestHeader.getClusterName(),
             requestHeader.getBrokerAddr(),

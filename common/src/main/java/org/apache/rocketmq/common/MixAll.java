@@ -136,6 +136,9 @@ public class MixAll {
         return 0;
     }
 
+    /*
+    * 将字符串数据写入到指定的fileName中，同时将之前的fileName（如果有的话）保存为.bak备份文件，保证写入失败时数据的高可用。
+    * */
     public static void string2File(final String str, final String fileName) throws IOException {
 
         String tmpFile = fileName + ".tmp";
@@ -312,6 +315,7 @@ public class MixAll {
         return properties;
     }
 
+    // 通过反射的方式，获取对应object的所有set方法，解析properties，获取对应set方法的对应值，并通过invoke的方式set进去
     public static void properties2Object(final Properties p, final Object object) {
         Method[] methods = object.getClass().getMethods();
         for (Method method : methods) {

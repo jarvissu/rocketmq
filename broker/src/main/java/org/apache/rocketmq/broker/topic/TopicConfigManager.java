@@ -55,6 +55,7 @@ public class TopicConfigManager extends ConfigManager {
     public TopicConfigManager() {
     }
 
+    // 构造器，初始化Broker内部的topic信息，包括但不限于SCHEDULE_TOPIC_XXXX,SELF_TEST_TOPIC等
     public TopicConfigManager(BrokerController brokerController) {
         this.brokerController = brokerController;
         {

@@ -41,6 +41,9 @@ import org.apache.rocketmq.srvutil.ServerUtil;
 import org.apache.rocketmq.srvutil.ShutdownHookThread;
 import org.slf4j.LoggerFactory;
 
+/*
+* NameServer 的启动入口
+* */
 public class NamesrvStartup {
 
     private static InternalLogger log;
@@ -73,16 +76,19 @@ public class NamesrvStartup {
         //PackageConflictDetect.detectFastjson();
 
         Options options = ServerUtil.buildCommandlineOptions(new Options());
+        // 解析命令行参数，获取启动参数
         commandLine = ServerUtil.parseCmdLine("mqnamesrv", args, buildCommandlineOptions(options), new PosixParser());
         if (null == commandLine) {
             System.exit(-1);
             return null;
         }
 
+        // 根据启动参数，构造namesrvConfig和nettyServerConfig
         final NamesrvConfig namesrvConfig = new NamesrvConfig();
         final NettyServerConfig nettyServerConfig = new NettyServerConfig();
-        nettyServerConfig.setListenPort(9876);
+        nettyServerConfig.setListenPort(9876); // NameServer默认端口号：9876
         if (commandLine.hasOption('c')) {
+            // -c： 指定配置文件
             String file = commandLine.getOptionValue('c');
             if (file != null) {
                 InputStream in = new BufferedInputStream(new FileInputStream(file));
@@ -99,6 +105,7 @@ public class NamesrvStartup {
         }
 
         if (commandLine.hasOption('p')) {
+            // -p : 打印配置信息，如果指定了-p，则只打印配置信息
             InternalLogger console = InternalLoggerFactory.getLogger(LoggerName.NAMESRV_CONSOLE_NAME);
             MixAll.printObjectProperties(console, namesrvConfig);
             MixAll.printObjectProperties(console, nettyServerConfig);
@@ -108,6 +115,7 @@ public class NamesrvStartup {
         MixAll.properties2Object(ServerUtil.commandLine2Properties(commandLine), namesrvConfig);
 
         if (null == namesrvConfig.getRocketmqHome()) {
+            // 未设置RocketMQHome环境变量，直接启动失败。
             System.out.printf("Please set the %s variable in your environment to match the location of the RocketMQ installation%n", MixAll.ROCKETMQ_HOME_ENV);
             System.exit(-2);
         }
@@ -137,12 +145,21 @@ public class NamesrvStartup {
             throw new IllegalArgumentException("NamesrvController is null");
         }
 
+        /*
+        * 初始化Controller:
+        * 1. 注册默认的网络处理器DefaultRequestProcessor（非测试集群模式）
+        * 2. 注册scheduler定时器，用于定时检测不活跃的（心跳超时）Broker，以及定时器用于打印全局配置（每10分钟）
+        * 3. TlsMode还需要重新加载SslContext
+        * */
         boolean initResult = controller.initialize();
         if (!initResult) {
             controller.shutdown();
             System.exit(-3);
         }
 
+        /*
+        * 注册关闭的钩子函数。JVM进程退出时，关闭NameServer的相关服务。（优雅停机）
+        * */
         Runtime.getRuntime().addShutdownHook(new ShutdownHookThread(log, new Callable<Void>() {
             @Override
             public Void call() throws Exception {
@@ -151,6 +168,11 @@ public class NamesrvStartup {
             }
         }));
 
+        /*
+        * 启动NameServer的Controller：
+        * 1. 启动remotingServer：说白了，就是启动Netty服务，用于监听网络请求
+        * 2. TlsMode下，会注册fileWatchService监听器，用于加载注册SslContext信息
+        * */
         controller.start();
 
         return controller;

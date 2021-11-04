@@ -29,9 +29,14 @@ public abstract class ConfigManager {
     public boolean load() {
         String fileName = null;
         try {
+            /*
+            * 获取对应的配置文件路径，是一个抽象方法，由底层实体类实现：
+            * 1. TopicConfigManager： $USER_HOME/store/config/topics.json
+            * */
             fileName = this.configFilePath();
             String jsonString = MixAll.file2String(fileName);
 
+            // 文件是json格式的配置文件，具体的decode也由具体实现类实现。
             if (null == jsonString || jsonString.length() == 0) {
                 return this.loadBak();
             } else {
@@ -67,6 +72,12 @@ public abstract class ConfigManager {
 
     public abstract void decode(final String jsonString);
 
+    /*
+    * 当配置信息发生变更时，执行持久化操作，将配置信息写入到磁盘
+    * 1. topic发生变化时，持久化到topics.json文件中
+    * 2. 消费位移发生变化时，持久化到consumerOffset.json中
+    * .......
+    * */
     public synchronized void persist() {
         String jsonString = this.encode(true);
         if (jsonString != null) {

@@ -275,6 +275,7 @@ public class Configuration {
         return stringBuilder.toString();
     }
 
+    // 合并两个properties文件配置
     private void merge(Properties from, Properties to) {
         for (Object key : from.keySet()) {
             Object fromObj = from.get(key), toObj = to.get(key);

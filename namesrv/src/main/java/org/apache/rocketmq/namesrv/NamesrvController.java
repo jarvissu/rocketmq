@@ -39,6 +39,9 @@ import org.apache.rocketmq.remoting.netty.TlsSystemConfig;
 import org.apache.rocketmq.srvutil.FileWatchService;
 
 
+/*
+* NamesrvController ： NameServer的核心控制器，封装NameServer的所有配置信息，包括业务配置和netty网络配置
+* */
 public class NamesrvController {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.NAMESRV_LOGGER_NAME);
 
@@ -49,6 +52,11 @@ public class NamesrvController {
     private final ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor(new ThreadFactoryImpl(
         "NSScheduledThread"));
     private final KVConfigManager kvConfigManager;
+    /*
+    * 路由管理器，NamesrvController的核心组件，用于路由信息，包括如下内容：
+    * 1. 保存Broker的路由信息
+    * 2. 保存topic对应的路由信息
+    * */
     private final RouteInfoManager routeInfoManager;
 
     private RemotingServer remotingServer;
@@ -73,6 +81,7 @@ public class NamesrvController {
         this.configuration.setStorePathFromConfig(this.namesrvConfig, "configStorePath");
     }
 
+    // 初始化NamesrvController
     public boolean initialize() {
 
         this.kvConfigManager.load();
@@ -84,6 +93,7 @@ public class NamesrvController {
 
         this.registerProcessor();
 
+        // 设置一个定时器，延迟5秒执行，每10秒检测一次Broker的状态，检测不活跃的broker
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
 
             @Override
@@ -92,6 +102,7 @@ public class NamesrvController {
             }
         }, 5, 10, TimeUnit.SECONDS);
 
+        // 定时器，延迟1分钟执行，每十分钟打印一次全局配置
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
 
             @Override
@@ -101,6 +112,7 @@ public class NamesrvController {
         }, 1, 10, TimeUnit.MINUTES);
 
         if (TlsSystemConfig.tlsMode != TlsMode.DISABLED) {
+            // 开启sslMod，需要注册一个监听器，用于加载SslContext
             // Register a listener to reload SslContext
             try {
                 fileWatchService = new FileWatchService(
@@ -144,10 +156,12 @@ public class NamesrvController {
     private void registerProcessor() {
         if (namesrvConfig.isClusterTest()) {
 
+            // 测试集群
             this.remotingServer.registerDefaultProcessor(new ClusterTestRequestProcessor(this, namesrvConfig.getProductEnvName()),
                 this.remotingExecutor);
         } else {
 
+            // 非测试集群，注册默认的Processor
             this.remotingServer.registerDefaultProcessor(new DefaultRequestProcessor(this), this.remotingExecutor);
         }
     }
@@ -156,6 +170,7 @@ public class NamesrvController {
         this.remotingServer.start();
 
         if (this.fileWatchService != null) {
+            // TlsMode模式下，才会注册fileWatchService监听器，用于加载注册SslContext
             this.fileWatchService.start();
         }
     }

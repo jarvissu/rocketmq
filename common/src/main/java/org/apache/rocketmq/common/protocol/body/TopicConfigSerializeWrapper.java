@@ -23,6 +23,11 @@ import org.apache.rocketmq.common.DataVersion;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.remoting.protocol.RemotingSerializable;
 
+/*
+* topic配置序列化的装饰器。
+* 1. topicConfigTable：topic配置管理表，key为topic名称，value为对应的配置信息
+* 2. dataVersion：当前版本。当topic配置信息发生变化时，dataVersion会发生变化
+* */
 public class TopicConfigSerializeWrapper extends RemotingSerializable {
     private ConcurrentMap<String, TopicConfig> topicConfigTable =
         new ConcurrentHashMap<String, TopicConfig>();

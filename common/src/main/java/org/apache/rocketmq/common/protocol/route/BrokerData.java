@@ -24,8 +24,14 @@ import java.util.Random;
 import org.apache.rocketmq.common.MixAll;
 
 public class BrokerData implements Comparable<BrokerData> {
-    private String cluster;
-    private String brokerName;
+    private String cluster;  // 当前broker对应集群cluster名称
+    private String brokerName; // 当前broker的名称
+    /*
+    * 一个Broker可以有多个副本，相同的brokerName表示为相同的Broker，其中：
+    * 1. brokerId=0： 表示为主Broker
+    * 2. brokerId!=0： 表示为 备份Broker
+    * 3. 只有BrokerId=1的备份节点，可以用来提供读服务
+    * */
     private HashMap<Long/* brokerId */, String/* broker address */> brokerAddrs;
 
     private final Random random = new Random();

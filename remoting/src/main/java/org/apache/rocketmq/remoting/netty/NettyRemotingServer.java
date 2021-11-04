@@ -63,19 +63,29 @@ import org.apache.rocketmq.remoting.exception.RemotingTimeoutException;
 import org.apache.rocketmq.remoting.exception.RemotingTooMuchRequestException;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
+/*
+* NettyRemotingServer：承载了整个RocketMQ的网络相关的请求和转发，采用1-N-M1-M2的线程模型，处理包括NameServer和Broker相关网络请求
+* 1： eventLoopGroupBoss：Boss线程池，用于监听accept事件，完成客户端的链接
+* N： eventLoopGroupSelector： Child线程池，用于监听网络中的write，read事件。当发生write，read事件时，将事件丢给M1线程池完成
+* M1： defaultEventExecutorGroup： 业务线程池，用于完成一个事件的编解码，ssl握手，链接管理等。
+* 1-N-M1是典型的Reactor模型。但是RocketMQ在Reactor基础上又进行了优化，设计了M2线程池，
+* M2： publicExecutor：当M1处理完一次读写请求后，解析出对应的命令，具体的命令的执行操作交给对应的线程池完成。
+*   该线程池通常在注册命令时进行绑定，如果没有显示指定线程池，则使用公共业务线程池publicExecutor
+* */
 public class NettyRemotingServer extends NettyRemotingAbstract implements RemotingServer {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(RemotingHelper.ROCKETMQ_REMOTING);
     private final ServerBootstrap serverBootstrap;
-    private final EventLoopGroup eventLoopGroupSelector;
-    private final EventLoopGroup eventLoopGroupBoss;
+    private final EventLoopGroup eventLoopGroupSelector; // Child线程池，用于监听write，read事件。通过serverSelectorThreads配置。默认3
+    private final EventLoopGroup eventLoopGroupBoss;     // Boss线程池，用于处理accept事件，只有一个线程承载
     private final NettyServerConfig nettyServerConfig;
 
+    // 公共的业务线程池，当对应的命令没有指定私有线程池时，默认使用该公共线程池。可通过serverCallbackExecutorThreads配置，默认4
     private final ExecutorService publicExecutor;
     private final ChannelEventListener channelEventListener;
 
     private final Timer timer = new Timer("ServerHouseKeepingService", true);
+    // 初始化业务逻辑的EventGroup，用于处理具体的write，read事件，同时处理codec，sll三次握手等。线程池有serverWorkerThreads配置，默认8个线程
     private DefaultEventExecutorGroup defaultEventExecutorGroup;
-
 
     private int port = 0;
 
@@ -85,8 +95,11 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
 
     // sharable handlers
     private HandshakeHandler handshakeHandler;
+    // 网络编码器，执行编码操作。对应的解码器在注册时直接new。而没有作为NettyRemotingServer的一个属性。不知道为啥
     private NettyEncoder encoder;
+    // 负责管理客户端连接。当有客户端连接到来或者断开时，触发channelActive或者channelInactive操作。
     private NettyConnectManageHandler connectionManageHandler;
+    // 具体的业务处理器，用于处理具体的客户端命令，如创建topic，发送消息，拉取消息等
     private NettyServerHandler serverHandler;
 
     public NettyRemotingServer(final NettyServerConfig nettyServerConfig) {
@@ -105,6 +118,7 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
             publicThreadNums = 4;
         }
 
+        // 初始化公共线程池，用于处理具体的命令。（并且当注册命令时，没有指定具体的线程池时使用）
         this.publicExecutor = Executors.newFixedThreadPool(publicThreadNums, new ThreadFactory() {
             private AtomicInteger threadIndex = new AtomicInteger(0);
 
@@ -115,6 +129,8 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
         });
 
         if (useEpoll()) {
+            // 是否开启epoll模型。默认linux系统开启
+            // 初始化Boss线程池，只有一个线程用于监听网络连接accept事件
             this.eventLoopGroupBoss = new EpollEventLoopGroup(1, new ThreadFactory() {
                 private AtomicInteger threadIndex = new AtomicInteger(0);
 
@@ -124,6 +140,7 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
                 }
             });
 
+            // 初始化Child线程池，默认3个，用于监听网络中的write，read事件。
             this.eventLoopGroupSelector = new EpollEventLoopGroup(nettyServerConfig.getServerSelectorThreads(), new ThreadFactory() {
                 private AtomicInteger threadIndex = new AtomicInteger(0);
                 private int threadTotal = nettyServerConfig.getServerSelectorThreads();
@@ -181,6 +198,7 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
 
     @Override
     public void start() {
+        // 初始化业务逻辑的EventGroup，线程池有serverWorkerThreads配置，默认8个线程
         this.defaultEventExecutorGroup = new DefaultEventExecutorGroup(
             nettyServerConfig.getServerWorkerThreads(),
             new ThreadFactory() {
@@ -193,18 +211,25 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
                 }
             });
 
+        /*
+        * 初始化通用的Netty的handler。netty框架基于流水线的方式，会注册多个handler。
+        * 1. HandshakeHandler： 处理TCP三次握手的handler
+        * 2. NettyEncoder： 协议编解码
+        * 3. NettyConnectManageHandler： 链接管理器
+        * 4. NettyServerHandler： NettyServer，NameServer的业务处理器
+        * */
         prepareSharableHandlers();
 
         ServerBootstrap childHandler =
             this.serverBootstrap.group(this.eventLoopGroupBoss, this.eventLoopGroupSelector)
-                .channel(useEpoll() ? EpollServerSocketChannel.class : NioServerSocketChannel.class)
+                .channel(useEpoll() ? EpollServerSocketChannel.class : NioServerSocketChannel.class)   // Linux环境下，且epoll可用时，优先使用epoll监听事件，否则使用NIO
                 .option(ChannelOption.SO_BACKLOG, 1024)
                 .option(ChannelOption.SO_REUSEADDR, true)
                 .option(ChannelOption.SO_KEEPALIVE, false)
-                .childOption(ChannelOption.TCP_NODELAY, true)
+                .childOption(ChannelOption.TCP_NODELAY, true)   // 设置tcp_nodelay参数为true，避免高延迟。因为NameServer的收发消息都是一些小的元数据信息
                 .childOption(ChannelOption.SO_SNDBUF, nettyServerConfig.getServerSocketSndBufSize())
                 .childOption(ChannelOption.SO_RCVBUF, nettyServerConfig.getServerSocketRcvBufSize())
-                .localAddress(new InetSocketAddress(this.nettyServerConfig.getListenPort()))
+                .localAddress(new InetSocketAddress(this.nettyServerConfig.getListenPort()))  // 设置NameServer启动监听的端口号port
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     public void initChannel(SocketChannel ch) throws Exception {
@@ -212,8 +237,8 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
                             .addLast(defaultEventExecutorGroup, HANDSHAKE_HANDLER_NAME, handshakeHandler)
                             .addLast(defaultEventExecutorGroup,
                                 encoder,
-                                new NettyDecoder(),
-                                new IdleStateHandler(0, 0, nettyServerConfig.getServerChannelMaxIdleTimeSeconds()),
+                                new NettyDecoder(),  // 为什么decoder不在PrepareSharable中初始化呢？不是应该成对出现吗？
+                                new IdleStateHandler(0, 0, nettyServerConfig.getServerChannelMaxIdleTimeSeconds()),  // 心跳检测的handler
                                 connectionManageHandler,
                                 serverHandler
                             );
@@ -225,6 +250,7 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
         }
 
         try {
+            // 启动监听
             ChannelFuture sync = this.serverBootstrap.bind().sync();
             InetSocketAddress addr = (InetSocketAddress) sync.channel().localAddress();
             this.port = addr.getPort();
@@ -287,6 +313,9 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
         }
     }
 
+    /*
+    * 向processorTable中注册processor，不同的requestCode对应不同的processor处理器，并且由不同的线程池executor执行
+    * */
     @Override
     public void registerProcessor(int requestCode, NettyRequestProcessor processor, ExecutorService executor) {
         ExecutorService executorThis = executor;
@@ -412,6 +441,10 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
         }
     }
 
+    /*
+    * RocketMQ的核心处理器，用于处理RocketMQ中的各个客户端命令。包括NameServer的命令和Broker的命令。
+    * 接收到客户端请求，并经过codec编解码后，得到具体的RemotingCommand命令，直接透传给父类方法processMessageReceived执行
+    * */
     @ChannelHandler.Sharable
     class NettyServerHandler extends SimpleChannelInboundHandler<RemotingCommand> {
 

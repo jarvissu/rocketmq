@@ -174,12 +174,13 @@ public class BrokerController {
         final NettyClientConfig nettyClientConfig,
         final MessageStoreConfig messageStoreConfig
     ) {
-        this.brokerConfig = brokerConfig;
-        this.nettyServerConfig = nettyServerConfig;
-        this.nettyClientConfig = nettyClientConfig;
-        this.messageStoreConfig = messageStoreConfig;
-        this.consumerOffsetManager = new ConsumerOffsetManager(this);
-        this.topicConfigManager = new TopicConfigManager(this);
+        this.brokerConfig = brokerConfig;  // Broker相关配置信息
+        this.nettyServerConfig = nettyServerConfig; // Broker相关的Netty网络配置
+        this.nettyClientConfig = nettyClientConfig; // Broker相关的Client配置，调用NameServer，上报心跳（topic路由）
+        this.messageStoreConfig = messageStoreConfig; // 消息存储配置信息
+
+        this.consumerOffsetManager = new ConsumerOffsetManager(this); // 初始化消费位移管理器
+        this.topicConfigManager = new TopicConfigManager(this);       // 初始化topic配置管理器
         this.pullMessageProcessor = new PullMessageProcessor(this);
         this.pullRequestHoldService = new PullRequestHoldService(this);
         this.messageArrivingListener = new NotifyMessageArrivingListener(this.pullRequestHoldService);
@@ -193,7 +194,7 @@ public class BrokerController {
         this.brokerOuterAPI = new BrokerOuterAPI(nettyClientConfig);
         this.filterServerManager = new FilterServerManager(this);
 
-        this.slaveSynchronize = new SlaveSynchronize(this);
+        this.slaveSynchronize = new SlaveSynchronize(this);   // Slave副本同步器
 
         this.sendThreadPoolQueue = new LinkedBlockingQueue<Runnable>(this.brokerConfig.getSendThreadPoolQueueCapacity());
         this.pullThreadPoolQueue = new LinkedBlockingQueue<Runnable>(this.brokerConfig.getPullThreadPoolQueueCapacity());
@@ -232,13 +233,18 @@ public class BrokerController {
     }
 
     public boolean initialize() throws CloneNotSupportedException {
+        // 从$USER_HOME/store/config/topics.json文件中，加载topic信息，并装配到topicConfigManager中
         boolean result = this.topicConfigManager.load();
 
+        // 从$USER_HOME/store/config/consumerOffset.json文件中，加载消费者信息，并装配到consumerOffsetManager中
         result = result && this.consumerOffsetManager.load();
+        // 从$USER_HOME/store/config/subscriptionGroup.json文件中，加载订阅组信息，并装配到subscriptionGroupManager中
         result = result && this.subscriptionGroupManager.load();
+        // 从$USER_HOME/store/config/consumerFilter.json文件中，加载消费者过滤器信息，并装配到consumerFilterManager中
         result = result && this.consumerFilterManager.load();
 
         if (result) {
+            // 上述Manager全部执行成功
             try {
                 this.messageStore =
                     new DefaultMessageStore(this.messageStoreConfig, this.brokerStatsManager, this.messageArrivingListener,
@@ -258,14 +264,18 @@ public class BrokerController {
             }
         }
 
+        // TODO: 如果上述加载失败，即result为false时，这里messageStore岂不是会导致"空指针异常"？
         result = result && this.messageStore.load();
 
+        // TODO: 为什么不使用谓语句，判断result=false时，提前返回
         if (result) {
+            // 初始化Broker的Server服务器（基于Netty实现）
             this.remotingServer = new NettyRemotingServer(this.nettyServerConfig, this.clientHousekeepingService);
             NettyServerConfig fastConfig = (NettyServerConfig) this.nettyServerConfig.clone();
             fastConfig.setListenPort(nettyServerConfig.getListenPort() - 2);
+            // TODO: fastRemotingServer是用来干嘛的呢？并且端口号比server端口号小2，能够确保一定能够使用吗？
             this.fastRemotingServer = new NettyRemotingServer(fastConfig, this.clientHousekeepingService);
-            this.sendMessageExecutor = new BrokerFixedThreadPoolExecutor(
+            this.sendMessageExecutor = new BrokerFixedThreadPoolExecutor( // 初始化发送消息的线程池
                 this.brokerConfig.getSendMessageThreadPoolNums(),
                 this.brokerConfig.getSendMessageThreadPoolNums(),
                 1000 * 60,
@@ -273,7 +283,7 @@ public class BrokerController {
                 this.sendThreadPoolQueue,
                 new ThreadFactoryImpl("SendMessageThread_"));
 
-            this.pullMessageExecutor = new BrokerFixedThreadPoolExecutor(
+            this.pullMessageExecutor = new BrokerFixedThreadPoolExecutor( // 初始化拉取消息的线程池
                 this.brokerConfig.getPullMessageThreadPoolNums(),
                 this.brokerConfig.getPullMessageThreadPoolNums(),
                 1000 * 60,
@@ -297,6 +307,7 @@ public class BrokerController {
                 this.queryThreadPoolQueue,
                 new ThreadFactoryImpl("QueryMessageThread_"));
 
+            // 管理台线程池，处理admin请求
             this.adminBrokerExecutor =
                 Executors.newFixedThreadPool(this.brokerConfig.getAdminBrokerThreadPoolNums(), new ThreadFactoryImpl(
                     "AdminBrokerThread_"));
@@ -329,8 +340,10 @@ public class BrokerController {
                 Executors.newFixedThreadPool(this.brokerConfig.getConsumerManageThreadPoolNums(), new ThreadFactoryImpl(
                     "ConsumerManageThread_"));
 
+            // 注册服务处理器processor，每一个RequestCode会对应一个Processor
             this.registerProcessor();
 
+            // 从凌晨0点开始，每天记录record一次当前brokerController的状态
             final long initialDelay = UtilAll.computeNextMorningTimeMillis() - System.currentTimeMillis();
             final long period = 1000 * 60 * 60 * 24;
             this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
@@ -344,6 +357,8 @@ public class BrokerController {
                 }
             }, initialDelay, period, TimeUnit.MILLISECONDS);
 
+            // 定时任务，定时（flushConsumerOffsetInterval配置项配置，默认5秒）由刷新消费者位移到磁盘（consumerOffset.json文件中）。
+            // 也就是Broker宕机，可能会丢失flushConsumerOffsetInterval秒的消费位移，从而导致消息可能被重复消费
             this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
                 @Override
                 public void run() {
@@ -355,6 +370,7 @@ public class BrokerController {
                 }
             }, 1000 * 10, this.brokerConfig.getFlushConsumerOffsetInterval(), TimeUnit.MILLISECONDS);
 
+            // 定时任务，定时（10秒）刷新消费者过滤器filter到磁盘文件（consumerFilter.json文件中）：主要用于表达式过滤
             this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
                 @Override
                 public void run() {
@@ -366,6 +382,7 @@ public class BrokerController {
                 }
             }, 1000 * 10, 1000 * 10, TimeUnit.MILLISECONDS);
 
+            // 定时任务，每3分钟进行一次broker的状态检测，踢出消费太慢（消费位移延迟大于设定的值）的consumer
             this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
                 @Override
                 public void run() {
@@ -377,6 +394,7 @@ public class BrokerController {
                 }
             }, 3, 3, TimeUnit.MINUTES);
 
+            // 每秒打印一次waterMark：即接收消息的offset和消费消息的offset
             this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
                 @Override
                 public void run() {
@@ -388,6 +406,7 @@ public class BrokerController {
                 }
             }, 10, 1, TimeUnit.SECONDS);
 
+            // 每分钟打印一次当前消息派发延迟
             this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
 
                 @Override
@@ -401,6 +420,7 @@ public class BrokerController {
             }, 1000 * 10, 1000 * 60, TimeUnit.MILLISECONDS);
 
             if (this.brokerConfig.getNamesrvAddr() != null) {
+                // namesrv不为空时，直接指定更新该NameServer地址列表
                 this.brokerOuterAPI.updateNameServerAddressList(this.brokerConfig.getNamesrvAddr());
                 log.info("Set user specified name server address: {}", this.brokerConfig.getNamesrvAddr());
             } else if (this.brokerConfig.isFetchNamesrvAddrByAddressServer()) {
@@ -479,13 +499,16 @@ public class BrokerController {
                     log.warn("FileWatchService created error, can't load the certificate dynamically");
                 }
             }
-            initialTransaction();
-            initialAcl();
+            initialTransaction(); //
+            initialAcl();   // 初始化acl相关的检验逻辑，通过serviceLoader动态加载对应的Validator
             initialRpcHooks();
         }
         return result;
     }
 
+    /*
+    * 初始化事务消息相关的service
+    * */
     private void initialTransaction() {
         this.transactionalMessageService = ServiceProvider.loadClass(ServiceProvider.TRANSACTION_SERVICE_ID, TransactionalMessageService.class);
         if (null == this.transactionalMessageService) {
@@ -501,6 +524,9 @@ public class BrokerController {
         this.transactionalMessageCheckService = new TransactionalMessageCheckService(this);
     }
 
+    /*
+    * 初始化ACL参数检查器Validator：通过rpchook的方式（类型AOP）实现
+    * */
     private void initialAcl() {
         if (!this.brokerConfig.isAclEnable()) {
             log.info("The broker dose not enable acl");
@@ -531,7 +557,9 @@ public class BrokerController {
         }
     }
 
-
+    /*
+    * 初始化RPC钩子函数，用于在网络命令执行前面执行，相当于Spring的AOP的概念
+    * */
     private void initialRpcHooks() {
 
         List<RPCHook> rpcHooks = ServiceProvider.load(ServiceProvider.RPC_HOOK_ID, RPCHook.class);
@@ -634,6 +662,7 @@ public class BrokerController {
 
     public void protectBroker() {
         if (this.brokerConfig.isDisableConsumeIfConsumerReadSlowly()) {
+            // 当开启broker的保护机制后，如果有消费者消费太满，会disable该消费者。避免慢的consumer占用broker连接资源
             final Iterator<Map.Entry<String, MomentStatsItem>> it = this.brokerStatsManager.getMomentStatsItemSetFallSize().getStatsItemTable().entrySet().iterator();
             while (it.hasNext()) {
                 final Map.Entry<String, MomentStatsItem> next = it.next();
@@ -850,6 +879,14 @@ public class BrokerController {
 
     public void start() throws Exception {
         if (this.messageStore != null) {
+            /* 启动MessageStore，定时执行消息的刷盘操作，依次启动如下service线程：
+             * 1. reputMessageService
+             * 2. flushConsumeQueueService
+             * 3. commitLog
+             * 4. storeStatsService
+             * 5. 创建临时文件：$USER_HOME/store/abort，暂时不知道有什么用
+             * 6. 添加定时任务
+             */
             this.messageStore.start();
         }
 
@@ -887,6 +924,9 @@ public class BrokerController {
             this.registerBrokerAll(true, false, true);
         }
 
+        /*
+        * 启动定时任务，定时上报Broker信息到NameServer。最小10s，最大60s
+        * */
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
 
             @Override
